@@ -1,0 +1,17 @@
+node_modules/
+temp/
+bin/
+models/
+*.bin
+*.exe
+*.dll
+*.mp3
+*.wav
+*.mp4
+*.mov
+*.mkv
+*.srt
+*.txt
+*.captions.json
+.env
+.DS_Store

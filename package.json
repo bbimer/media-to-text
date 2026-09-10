@@ -1,0 +1,20 @@
+{
+  "name": "media-to-text",
+  "version": "1.0.0",
+  "description": "Universal Media to Text and Subtitle Transcriber (FFmpeg + Whisper)",
+  "main": "transcribe.js",
+  "scripts": {
+    "start": "node transcribe.js"
+  },
+  "keywords": [
+    "transcription",
+    "speech-to-text",
+    "whisper",
+    "ffmpeg",
+    "audio-to-text",
+    "subtitles",
+    "srt"
+  ],
+  "author": "bbimer",
+  "license": "MIT"
+}
