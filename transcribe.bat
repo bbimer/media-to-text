@@ -4,7 +4,7 @@ setlocal enabledelayedexpansion
 title Media-to-Text Universal Transcriber
 
 echo ========================================================================
-echo   MEDIA-TO-TEXT: Universal Media & YouTube Transcriber
+echo   MEDIA-TO-TEXT: Universal Media ^& YouTube Transcriber
 echo ========================================================================
 echo.
 
