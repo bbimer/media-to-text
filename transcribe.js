@@ -29,6 +29,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync, spawnSync } = require('child_process');
+const yt = require('./src/youtube.js');
 
 // ----------------------------- CONFIG & DEFAULTS -----------------------------
 const DEFAULTS = {
@@ -718,6 +719,17 @@ function transcribeWithLocalWhisper(inputAudioPath, ffmpegPath, whisperInfo, lan
 }
 
 // ----------------------------- EXPORT HELPERS (SRT & TXT) -----------------------------
+// ----------------------------- EXPORT HELPERS (SRT & TXT) -----------------------------
+function formatClock(sec) {
+  const total = Math.floor(Math.max(0, sec || 0));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  if (h > 0) return `${pad(h, 2)}:${pad(remM, 2)}:${pad(s, 2)}`;
+  return `${pad(remM, 2)}:${pad(s, 2)}`;
+}
+
 function formatSrtTimestamp(sec) {
   const safeSec = Math.max(0, sec || 0);
   const totalMs = Math.round(safeSec * 1000);
@@ -728,6 +740,18 @@ function formatSrtTimestamp(sec) {
   const m = totalMin % 60;
   const h = Math.floor(totalMin / 60);
   return `${pad(h, 2)}:${pad(m, 2)}:${pad(s, 2)},${pad(ms, 3)}`;
+}
+
+function assignChaptersToPages(captionData, chapters) {
+  if (!chapters || chapters.length === 0) return;
+  for (const page of captionData.pages) {
+    const ch = chapters.find(c => page.start >= c.start && page.start < c.end) || chapters[chapters.length - 1];
+    if (ch) {
+      page.chapterId = ch.id;
+      page.chapterTitle = ch.title;
+      page.chapterRange = `${formatClock(ch.start)} - ${formatClock(ch.end)}`;
+    }
+  }
 }
 
 function generateSrt(captionData) {
@@ -741,8 +765,58 @@ function generateSrt(captionData) {
   return blocks.join('\n');
 }
 
-function generateCleanTxt(captionData) {
-  return captionData.pages.map(p => p.lines.map(l => l.text).join(' ')).join('\n\n');
+function generateCleanTxt(captionData, chapters = [], metadata = null) {
+  const sections = [];
+
+  if (metadata && metadata.title) {
+    const metaHeader = [
+      `========================================================================`,
+      `🎬 НАЗВАНИЕ: ${metadata.title}`,
+      metadata.url ? `🔗 ИСТОЧНИК: ${metadata.url}` : null,
+      metadata.channel ? `📺 АВТОР:    ${metadata.channel}` : null,
+      metadata.duration ? `⏱️ ХРОНОМЕТРАЖ: ${formatClock(metadata.duration)} (${metadata.duration} сек)` : null,
+      `========================================================================`
+    ].filter(Boolean).join('\n');
+    sections.push(metaHeader);
+  }
+
+  if (!chapters || chapters.length === 0) {
+    const pageTexts = captionData.pages.map(p => p.lines.map(l => l.text).join(' '));
+    sections.push(pageTexts.join('\n\n'));
+    return sections.join('\n\n');
+  }
+
+  // Group pages by chapter
+  const chapterGroups = {};
+  for (const ch of chapters) {
+    chapterGroups[ch.id] = { chapter: ch, pages: [] };
+  }
+
+  for (const page of captionData.pages) {
+    const cid = page.chapterId || 1;
+    if (!chapterGroups[cid]) {
+      chapterGroups[cid] = {
+        chapter: { id: cid, title: page.chapterTitle || `Phase ${cid}`, start: page.start, end: page.end },
+        pages: []
+      };
+    }
+    chapterGroups[cid].pages.push(page);
+  }
+
+  for (const cid of Object.keys(chapterGroups)) {
+    const grp = chapterGroups[cid];
+    const ch = grp.chapter;
+    const banner = [
+      `========================================================================`,
+      `📍 ФАЗА ${ch.id}: [${formatClock(ch.start)} - ${formatClock(ch.end)}] ${ch.title.toUpperCase()}`,
+      `========================================================================`
+    ].join('\n');
+
+    const bodyText = grp.pages.map(p => p.lines.map(l => l.text).join(' ')).join('\n\n');
+    sections.push(`${banner}\n\n${bodyText || '—'}`);
+  }
+
+  return sections.join('\n\n');
 }
 
 // ----------------------------- MAIN CLI ENTRYPOINT -----------------------------
@@ -751,13 +825,14 @@ async function main() {
   if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
     console.log(`
 ========================================================================
-  ⚡ NS KINETIC SUBTITLES — Universal Transcriber & Compiler (v2.7)
+  ⚡ MEDIA TO TEXT — Universal Audio, Video & YouTube Transcriber
 ========================================================================
 
 Usage:
-  node transcribe.js <video_or_audio_path> [options]
+  node transcribe.js <media_path_or_youtube_url> [options]
 
 Supported Inputs:
+  • YouTube:  https://www.youtube.com/watch?v=... / youtu.be/... / Shorts / Video ID
   • Audio:    .mp3, .wav, .m4a, .aac, .flac, .ogg
   • Video:    .mp4, .mov, .mkv, .webm, .avi, .flv
   • Captions: .srt, .vtt
@@ -770,31 +845,22 @@ Options:
   --casing <upper|asis>                    Text casing (default: upper)
   --max-chars <number>                     Max characters per page (default: 52)
 
-Engines:
-  • local:      100% Offline Whisper.cpp (CPU fast, zero API keys required)
-  • groq:       Groq Whisper-large-v3 API (Ultra fast, requires GROQ_API_KEY)
-  • elevenlabs: ElevenLabs Scribe STT API (Requires ELEVENLABS_API_KEY)
-  • openai:     OpenAI Whisper-1 API (Requires OPENAI_API_KEY)
+YouTube Features:
+  • Fast-Track Subtitle Extraction: ~1-2 sec, zero video/audio download!
+  • Smart Phase & Chapter Mapping: Parses video chapters & structures text into phases.
+  • Fallback Engine: If no subtitles exist, automatically downloads audio and runs Whisper.
 
 Examples:
-  node transcribe.js "voiceover.mp3"
+  node transcribe.js "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
   node transcribe.js "voiceover.mp3" --engine local
-  node transcribe.js "video.mp4" --format all
-  node transcribe.js "subs.srt" --out custom.captions.json
+  node transcribe.js "interview.mp4" --format txt
 ========================================================================
 `);
     process.exit(0);
   }
 
-  const inputPath = path.resolve(args[0]);
-  if (!fs.existsSync(inputPath)) {
-    console.error(`❌ Error: File not found: ${inputPath}`);
-    process.exit(1);
-  }
-
-  const ext = path.extname(inputPath).toLowerCase();
-  const baseName = path.basename(inputPath, ext);
-  const inputDir = path.dirname(inputPath);
+  const rawInput = args[0];
+  const isYt = yt.isYouTubeInput(rawInput);
 
   // Parse CLI flags
   const getArg = (flag, def = null) => {
@@ -807,6 +873,51 @@ Examples:
   const casingChoice = getArg('--casing', DEFAULTS.casing);
   const maxCharsChoice = parseInt(getArg('--max-chars', String(DEFAULTS.maxCharsPerPage)), 10) || DEFAULTS.maxCharsPerPage;
   const customOut = getArg('--out', null);
+
+  let inputPath = '';
+  let metadata = null;
+  let chapters = [];
+  let baseName = '';
+  let inputDir = process.cwd();
+  let tempAudioToCleanup = null;
+  let tempSubToCleanup = null;
+
+  if (isYt) {
+    const ytdlp = yt.findYtDlp();
+    if (!ytdlp) {
+      console.error('❌ Error: yt-dlp is required to process YouTube links.');
+      console.error('   Please install yt-dlp: pip install yt-dlp');
+      process.exit(1);
+    }
+
+    metadata = yt.fetchYouTubeMetadata(rawInput, ytdlp);
+    chapters = metadata.chapters || [];
+
+    console.log(`\n========================================================================`);
+    console.log(`🎬 YouTube Video: ${metadata.title}`);
+    console.log(`📺 Channel:       ${metadata.channel}`);
+    console.log(`⏱️ Duration:      ${formatClock(metadata.duration)} (${metadata.duration}s)`);
+    console.log(`📑 Chapters:      ${chapters.length ? chapters.length + ' detected' : 'None detected'}`);
+    console.log(`📋 Formats:       ${formatChoice.toUpperCase()}`);
+    console.log(`========================================================================`);
+
+    const safeTitle = metadata.title.replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || `youtube_${metadata.id}`;
+    baseName = safeTitle;
+  } else {
+    inputPath = path.resolve(rawInput);
+    if (!fs.existsSync(inputPath)) {
+      console.error(`❌ Error: File not found: ${inputPath}`);
+      process.exit(1);
+    }
+    const ext = path.extname(inputPath).toLowerCase();
+    baseName = path.basename(inputPath, ext);
+    inputDir = path.dirname(inputPath);
+
+    console.log(`\n========================================================================`);
+    console.log(`🎬 Input File:  ${inputPath}`);
+    console.log(`📋 Formats:     ${formatChoice.toUpperCase()}`);
+    console.log(`========================================================================`);
+  }
 
   // Setup output paths
   let outBase = path.join(inputDir, baseName);
@@ -828,94 +939,116 @@ Examples:
   const srtOutputPath = `${outBase}.srt`;
   const txtOutputPath = `${outBase}.txt`;
 
-  console.log(`\n========================================================================`);
-  console.log(`🎬 Input File:  ${inputPath}`);
-  console.log(`📂 Output Base: ${outBase}.*`);
-  console.log(`📋 Formats:     ${formatChoice.toUpperCase()}`);
-  console.log(`========================================================================`);
-
-  const ffmpeg = findFfmpeg();
-  const localWhisper = findLocalWhisper();
   let rawWords = [];
 
-  // 1. Check if subtitle file (.srt, .vtt)
-  if (ext === '.srt' || ext === '.vtt') {
-    rawWords = parseSubtitleFile(inputPath);
-  } else {
-    // 2. Select Transcription Engine
-    let engineChoice = (getArg('--engine', '') || '').toLowerCase();
+  if (isYt) {
+    const ytdlp = yt.findYtDlp();
+    const subLangs = langChoice !== 'auto' ? [langChoice] : ['ru', 'en'];
+    const subResult = yt.downloadYouTubeSubtitles(metadata.url, inputDir, ytdlp, metadata, subLangs);
 
-    if (!engineChoice) {
-      if (process.env.GROQ_API_KEY) engineChoice = 'groq';
-      else if (process.env.ELEVENLABS_API_KEY) engineChoice = 'elevenlabs';
-      else if (process.env.OPENAI_API_KEY) engineChoice = 'openai';
-      else if (localWhisper) engineChoice = 'local';
-      else {
-        console.error('❌ Error: No API keys found in .env and local Whisper was not found.');
-        console.error('   Please add GROQ_API_KEY, ELEVENLABS_API_KEY, or OPENAI_API_KEY to .env,');
-        console.error('   or place whisper-cli.exe in bin/ and ggml-base.bin in models/.');
-        process.exit(1);
-      }
-    }
-
-    if (engineChoice === 'local') {
-      if (!localWhisper) {
-        console.error('❌ Error: Local Whisper was not found (whisper-cli.exe or model missing).');
-        process.exit(1);
-      }
-      if (!ffmpeg) {
-        console.error('❌ Error: FFmpeg is required for audio resampling with Local Whisper.');
-        process.exit(1);
-      }
-      rawWords = transcribeWithLocalWhisper(inputPath, ffmpeg, localWhisper, langChoice);
+    if (subResult) {
+      console.log(`⚡ Fast-Track: Extracted YouTube subtitles (${subResult.lang}) in ~1 sec (zero video downloaded)!`);
+      tempSubToCleanup = subResult.filePath;
+      rawWords = parseSubtitleFile(subResult.filePath);
     } else {
-      // Cloud engines: ElevenLabs, Groq, OpenAI
-      let audioBuffer = null;
-      const isVideo = ['.mp4', '.mov', '.mkv', '.webm', '.avi', '.flv'].includes(ext);
+      console.log(`⚠️ No ready subtitles found on YouTube. Falling back to Audio Stream + Whisper...`);
+      const downloadedAudio = yt.downloadYouTubeAudioFallback(metadata.url, inputDir, ytdlp);
+      tempAudioToCleanup = downloadedAudio;
+      inputPath = downloadedAudio;
+    }
+  }
 
-      if (isVideo || ext !== '.mp3') {
-        if (!ffmpeg) {
-          console.error(`❌ Error: FFmpeg is required to process ${ext} files.`);
+  // If not extracted via YouTube subtitles, process inputPath (local file or downloaded fallback audio)
+  if (rawWords.length === 0 && inputPath) {
+    const ext = path.extname(inputPath).toLowerCase();
+    if (ext === '.srt' || ext === '.vtt') {
+      rawWords = parseSubtitleFile(inputPath);
+    } else {
+      // Select Transcription Engine
+      let engineChoice = (getArg('--engine', '') || '').toLowerCase();
+      const ffmpeg = findFfmpeg();
+      const localWhisper = findLocalWhisper();
+
+      if (!engineChoice) {
+        if (process.env.GROQ_API_KEY) engineChoice = 'groq';
+        else if (process.env.ELEVENLABS_API_KEY) engineChoice = 'elevenlabs';
+        else if (process.env.OPENAI_API_KEY) engineChoice = 'openai';
+        else if (localWhisper) engineChoice = 'local';
+        else {
+          console.error('❌ Error: No API keys found in .env and local Whisper was not found.');
+          console.error('   Please add GROQ_API_KEY, ELEVENLABS_API_KEY, or OPENAI_API_KEY to .env,');
+          console.error('   or place whisper-cli.exe in bin/ and ggml-base.bin in models/.');
           process.exit(1);
         }
-        const tempAudioPath = path.join(inputDir, `temp_${Date.now()}.mp3`);
-        console.log(`🎞️ Converting audio track via FFmpeg...`);
-        try {
-          execSync(`"${ffmpeg}" -y -i "${inputPath}" -vn -acodec libmp3lame -ar 16000 -ac 1 -q:a 4 "${tempAudioPath}"`, { stdio: 'ignore' });
-          audioBuffer = fs.readFileSync(tempAudioPath);
-          fs.unlinkSync(tempAudioPath);
-        } catch (errFfmpeg) {
-          if (fs.existsSync(tempAudioPath)) try { fs.unlinkSync(tempAudioPath); } catch (e) {}
-          console.error('❌ FFmpeg audio extraction failed:', errFfmpeg.message);
-          process.exit(1);
-        }
-      } else {
-        audioBuffer = fs.readFileSync(inputPath);
       }
 
-      if (engineChoice === 'groq') {
-        if (!process.env.GROQ_API_KEY) {
-          console.error('❌ Error: GROQ_API_KEY not found in .env');
+      if (engineChoice === 'local') {
+        if (!localWhisper) {
+          console.error('❌ Error: Local Whisper was not found (whisper-cli.exe or model missing).');
           process.exit(1);
         }
-        rawWords = await transcribeWithGroq(audioBuffer, process.env.GROQ_API_KEY);
-      } else if (engineChoice === 'elevenlabs') {
-        if (!process.env.ELEVENLABS_API_KEY) {
-          console.error('❌ Error: ELEVENLABS_API_KEY not found in .env');
+        if (!ffmpeg) {
+          console.error('❌ Error: FFmpeg is required for audio resampling with Local Whisper.');
           process.exit(1);
         }
-        rawWords = await transcribeWithElevenLabs(audioBuffer, process.env.ELEVENLABS_API_KEY);
-      } else if (engineChoice === 'openai') {
-        if (!process.env.OPENAI_API_KEY) {
-          console.error('❌ Error: OPENAI_API_KEY not found in .env');
-          process.exit(1);
-        }
-        rawWords = await transcribeWithOpenAI(audioBuffer, process.env.OPENAI_API_KEY);
+        rawWords = transcribeWithLocalWhisper(inputPath, ffmpeg, localWhisper, langChoice);
       } else {
-        console.error(`❌ Error: Unknown engine "${engineChoice}". Use local, elevenlabs, groq, or openai.`);
-        process.exit(1);
+        // Cloud engines: ElevenLabs, Groq, OpenAI
+        let audioBuffer = null;
+        const isVideo = ['.mp4', '.mov', '.mkv', '.webm', '.avi', '.flv'].includes(ext);
+
+        if (isVideo || ext !== '.mp3') {
+          if (!ffmpeg) {
+            console.error(`❌ Error: FFmpeg is required to process ${ext} files.`);
+            process.exit(1);
+          }
+          const tempAudioPath = path.join(inputDir, `temp_${Date.now()}.mp3`);
+          console.log(`🎞️ Converting audio track via FFmpeg...`);
+          try {
+            execSync(`"${ffmpeg}" -y -i "${inputPath}" -vn -acodec libmp3lame -ar 16000 -ac 1 -q:a 4 "${tempAudioPath}"`, { stdio: 'ignore' });
+            audioBuffer = fs.readFileSync(tempAudioPath);
+            fs.unlinkSync(tempAudioPath);
+          } catch (errFfmpeg) {
+            if (fs.existsSync(tempAudioPath)) try { fs.unlinkSync(tempAudioPath); } catch (e) {}
+            console.error('❌ FFmpeg audio extraction failed:', errFfmpeg.message);
+            process.exit(1);
+          }
+        } else {
+          audioBuffer = fs.readFileSync(inputPath);
+        }
+
+        if (engineChoice === 'groq') {
+          if (!process.env.GROQ_API_KEY) {
+            console.error('❌ Error: GROQ_API_KEY not found in .env');
+            process.exit(1);
+          }
+          rawWords = await transcribeWithGroq(audioBuffer, process.env.GROQ_API_KEY);
+        } else if (engineChoice === 'elevenlabs') {
+          if (!process.env.ELEVENLABS_API_KEY) {
+            console.error('❌ Error: ELEVENLABS_API_KEY not found in .env');
+            process.exit(1);
+          }
+          rawWords = await transcribeWithElevenLabs(audioBuffer, process.env.ELEVENLABS_API_KEY);
+        } else if (engineChoice === 'openai') {
+          if (!process.env.OPENAI_API_KEY) {
+            console.error('❌ Error: OPENAI_API_KEY not found in .env');
+            process.exit(1);
+          }
+          rawWords = await transcribeWithOpenAI(audioBuffer, process.env.OPENAI_API_KEY);
+        } else {
+          console.error(`❌ Error: Unknown engine "${engineChoice}". Use local, elevenlabs, groq, or openai.`);
+          process.exit(1);
+        }
       }
     }
+  }
+
+  // Cleanup temp files
+  if (tempSubToCleanup && fs.existsSync(tempSubToCleanup)) {
+    try { fs.unlinkSync(tempSubToCleanup); } catch (e) {}
+  }
+  if (tempAudioToCleanup && fs.existsSync(tempAudioToCleanup)) {
+    try { fs.unlinkSync(tempAudioToCleanup); } catch (e) {}
   }
 
   console.log(`✅ Extracted ${rawWords.length} words with word-level timestamps.`);
@@ -926,6 +1059,20 @@ Examples:
     casing: casingChoice,
     maxCharsPerPage: maxCharsChoice
   });
+
+  if (metadata) {
+    captionData.metadata = {
+      title: metadata.title,
+      url: metadata.url,
+      channel: metadata.channel,
+      duration: metadata.duration
+    };
+  }
+
+  if (chapters.length > 0) {
+    captionData.chapters = chapters;
+    assignChaptersToPages(captionData, chapters);
+  }
 
   // 4. Save formatted outputs based on formatChoice
   const savedFiles = [];
@@ -946,13 +1093,16 @@ Examples:
   }
 
   if (shouldSaveTxt) {
-    const txtContent = generateCleanTxt(captionData);
+    const txtContent = generateCleanTxt(captionData, chapters, metadata);
     fs.writeFileSync(txtOutputPath, txtContent, 'utf8');
     savedFiles.push({ type: 'Plain Text Transcript (TXT)', path: txtOutputPath, size: fs.statSync(txtOutputPath).size });
   }
 
   console.log(`\n========================================================================`);
   console.log(`🎉 SUCCESS! Compiled ${captionData.pages.length} semantic subtitle pages (${captionData.duration}s)`);
+  if (chapters.length > 0) {
+    console.log(`📑 Structured into ${chapters.length} Video Phases / Chapters!`);
+  }
   console.log(`📦 Saved Artifacts:`);
   for (const sf of savedFiles) {
     console.log(`   • [${sf.type}] (${(sf.size / 1024).toFixed(1)} KB) ➔ ${sf.path}`);
@@ -964,7 +1114,8 @@ Examples:
   for (const page of previewPages) {
     const timeCode = `${page.start.toFixed(2)}s – ${page.end.toFixed(2)}s`;
     const linesStr = page.lines.map(l => l.text).join(' / ');
-    console.log(`   [${pad(page.id, 3)}] (${timeCode}): ${linesStr}`);
+    const chTag = page.chapterTitle ? ` [${page.chapterTitle}]` : '';
+    console.log(`   [${pad(page.id, 3)}] (${timeCode})${chTag}: ${linesStr}`);
   }
   if (captionData.pages.length > 8) {
     console.log(`   ... and ${captionData.pages.length - 8} more pages.`);
@@ -995,4 +1146,5 @@ module.exports = {
   compileWordsToCaptions,
   parseSubtitleFile
 };
+
 
