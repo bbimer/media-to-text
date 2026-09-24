@@ -253,20 +253,29 @@ async function transcribeAudioFile(filePath, engineName, langChoice, localWhispe
     buffer = ffmpeg.extractMp3Buffer(filePath, tempDir);
   }
 
-  if (engineName === 'groq') {
-    if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY is not set in .env');
-    Logger.info(`⚡ Transcribing with Groq Whisper API (whisper-large-v3)...`);
-    return await WhisperCloudEngine.transcribeWithGroq(buffer, process.env.GROQ_API_KEY);
-  } else if (engineName === 'elevenlabs') {
-    if (!process.env.ELEVENLABS_API_KEY) throw new Error('ELEVENLABS_API_KEY is not set in .env');
-    Logger.info(`🎙️ Transcribing with ElevenLabs Scribe STT...`);
-    return await WhisperCloudEngine.transcribeWithElevenLabs(buffer, process.env.ELEVENLABS_API_KEY);
-  } else if (engineName === 'openai') {
-    if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is not set in .env');
-    Logger.info(`🌐 Transcribing with OpenAI Whisper API (whisper-1)...`);
-    return await WhisperCloudEngine.transcribeWithOpenAI(buffer, process.env.OPENAI_API_KEY);
-  } else {
-    throw new Error(`Unsupported engine: ${engineName}`);
+  try {
+    if (engineName === 'groq') {
+      if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY is not set in .env');
+      Logger.info(`⚡ Transcribing with Groq Whisper API (whisper-large-v3)...`);
+      return await WhisperCloudEngine.transcribeWithGroq(buffer, process.env.GROQ_API_KEY);
+    } else if (engineName === 'elevenlabs') {
+      if (!process.env.ELEVENLABS_API_KEY) throw new Error('ELEVENLABS_API_KEY is not set in .env');
+      Logger.info(`🎙️ Transcribing with ElevenLabs Scribe STT...`);
+      return await WhisperCloudEngine.transcribeWithElevenLabs(buffer, process.env.ELEVENLABS_API_KEY);
+    } else if (engineName === 'openai') {
+      if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is not set in .env');
+      Logger.info(`🌐 Transcribing with OpenAI Whisper API (whisper-1)...`);
+      return await WhisperCloudEngine.transcribeWithOpenAI(buffer, process.env.OPENAI_API_KEY);
+    } else {
+      throw new Error(`Unsupported engine: ${engineName}`);
+    }
+  } catch (cloudErr) {
+    if (localWhisper && localWhisper.isAvailable()) {
+      Logger.warn(`Cloud STT failed (${cloudErr.message}).`);
+      Logger.info(`🔄 Auto-Fallback: Switching to Local Whisper.cpp (100% Offline / Free)...`);
+      return localWhisper.transcribe(filePath, langChoice);
+    }
+    throw cloudErr;
   }
 }
 
