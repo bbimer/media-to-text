@@ -20,7 +20,7 @@ function loadEnv() {
           if (m) {
             const k = m[1].trim();
             const v = m[2].trim().replace(/^["']|["']$/g, '');
-            if (!process.env[k]) process.env[k] = v;
+            process.env[k] = v;
           }
         }
       } catch (e) {
